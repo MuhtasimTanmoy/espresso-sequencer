@@ -2,6 +2,7 @@ use crate::{
     l1_client::{L1Client, L1ClientOptions, L1Snapshot},
     L1BlockInfo, NMTRoot, NamespaceProofType, Transaction, TransactionNMT, VmId, MAX_NMT_DEPTH,
 };
+use anyhow::{ensure, Context};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, Read, SerializationError, Valid, Validate,
 };
@@ -141,6 +142,86 @@ pub struct ValidatedState {
     pub block_merkle_tree: BlockMerkleTree,
     /// Fee Merkle Tree
     pub fee_merkle_tree: FeeMerkleTree,
+}
+
+/// A proof of the balance of an account in the fee ledger.
+///
+/// If the account of interest does not exist in the fee state, this is a Merkle non-membership
+/// proof, and the balance is implicitly zero. Otherwise, this is a normal Merkle membership proof.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FeeAccountProof {
+    account: Address,
+    proof: FeeMerkleProof,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+enum FeeMerkleProof {
+    Presence(<FeeMerkleTree as MerkleTreeScheme>::MembershipProof),
+    Absence(<FeeMerkleTree as UniversalMerkleTreeScheme>::NonMembershipProof),
+}
+
+impl FeeAccountProof {
+    pub fn prove(tree: &FeeMerkleTree, account: Address) -> Option<(U256, Self)> {
+        match tree.universal_lookup(FeeAccount(account)) {
+            LookupResult::Ok(balance, proof) => Some((
+                balance.0,
+                Self {
+                    account,
+                    proof: FeeMerkleProof::Presence(proof),
+                },
+            )),
+            LookupResult::NotFound(proof) => Some((
+                0.into(),
+                Self {
+                    account,
+                    proof: FeeMerkleProof::Presence(proof),
+                },
+            )),
+            LookupResult::NotInMemory => None,
+        }
+    }
+
+    pub fn verify(&self, comm: &FeeMerkleCommitment) -> anyhow::Result<U256> {
+        match &self.proof {
+            FeeMerkleProof::Presence(proof) => {
+                ensure!(
+                    FeeMerkleTree::verify(comm.digest(), FeeAccount(self.account), proof)?.is_ok(),
+                    "invalid proof"
+                );
+                Ok(proof
+                    .elem()
+                    .context("presence proof is missing account balance")?
+                    .0)
+            }
+            FeeMerkleProof::Absence(proof) => {
+                let tree = FeeMerkleTree::from_commitment(comm);
+                ensure!(
+                    tree.non_membership_verify(FeeAccount(self.account), proof)?,
+                    "invalid proof"
+                );
+                Ok(0.into())
+            }
+        }
+    }
+
+    pub fn remember(&self, tree: &mut FeeMerkleTree) -> anyhow::Result<()> {
+        match &self.proof {
+            FeeMerkleProof::Presence(proof) => {
+                tree.remember(
+                    FeeAccount(self.account),
+                    proof
+                        .elem()
+                        .context("presence proof is missing account balance")?,
+                    proof,
+                )?;
+                Ok(())
+            }
+            FeeMerkleProof::Absence(proof) => {
+                tree.non_membership_remember(FeeAccount(self.account), proof)?;
+                Ok(())
+            }
+        }
+    }
 }
 
 /// A header is like a [`Block`] with the body replaced by a digest.

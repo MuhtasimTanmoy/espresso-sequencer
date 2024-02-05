@@ -5,6 +5,7 @@ use super::{
     sql,
 };
 use crate::{
+    block::ValidatedState,
     network, persistence,
     state_signature::{LightClientState, StateSignature, StateSignatureRequestBody},
     Node, SeqTypes,
@@ -18,6 +19,7 @@ use hotshot_query_service::{
     status::StatusDataSource,
     QueryResult,
 };
+use hotshot_types::data::ViewNumber;
 use tide_disco::Url;
 
 pub trait DataSourceOptions: persistence::PersistenceOptions {
@@ -97,6 +99,12 @@ pub(crate) trait StateSignatureDataSource<N: network::Type> {
     async fn get_state_signature(&self, height: u64) -> Option<StateSignatureRequestBody>;
 
     async fn sign_new_state(&self, state: &LightClientState) -> StateSignature;
+}
+
+#[trait_variant::make(StateDataSource: Send)]
+pub(crate) trait LocalStateDataSource {
+    async fn get_decided_state(&self) -> &ValidatedState;
+    async fn get_undecided_state(&self, view: ViewNumber) -> Option<&ValidatedState>;
 }
 
 #[cfg(test)]
